@@ -83,6 +83,81 @@ async function getUserConfirmation(prompt) {
 	return confirmation;
 }
 
+async function checkExistingFiles(downloadFolder, url, option) {
+    try {
+        // Extract video ID from URL to create a more reliable filename check
+        let videoId = '';
+        const patterns = [
+            /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,
+            /(?:vimeo\.com\/)(\d+)/,
+            /(?:tiktok\.com\/.*\/video\/)(\d+)/,
+            /(?:instagram\.com\/p\/|instagr\.am\/)([A-Za-z0-9_-]+)/
+        ];
+        
+        for (const pattern of patterns) {
+            const match = url.match(pattern);
+            if (match) {
+                videoId = match[1];
+                break;
+            }
+        }
+        
+        // If we couldn't extract a video ID, try getting filename from yt-dlp
+        if (!videoId) {
+            try {
+                const { stdout } = await execPromise(`"${ytdlpPath}" --get-filename -o "%(title)s.%(ext)s" -- "${url}"`);
+                const filename = stdout.trim().replace(/[\n\r]/g, '');
+                videoId = filename; // Use the filename as identifier
+            } catch (error) {
+                // If both methods fail, return null to continue with download
+                return null;
+            }
+        }
+        
+        // Determine expected file extension based on option
+        let expectedExtensions;
+        switch(option) {
+            case '2': // Audio only
+                expectedExtensions = ['.mp3'];
+                break;
+            case '3': // 1080p
+            case '4': // 720p
+            case '1': // Best quality up to 720p
+            default:
+                expectedExtensions = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.m4a']; // Common video/audio extensions
+                break;
+        }
+        
+        // Look for files that match the expected pattern
+        const files = fs.readdirSync(downloadFolder);
+        
+        for (const file of files) {
+            const filePath = path.join(downloadFolder, file);
+            const stat = fs.statSync(filePath);
+            
+            if (stat.isFile()) {
+                const fileExt = path.extname(file).toLowerCase();
+                
+                // Check if file has expected extension and contains the video ID or similar pattern
+                if (expectedExtensions.includes(fileExt)) {
+                    const lowerFile = file.toLowerCase();
+                    const lowerVideoId = videoId.toLowerCase();
+                    
+                    // Check if filename contains the video ID or the URL string (for cases where ID extraction fails)
+                    if (lowerFile.includes(lowerVideoId) || lowerFile.includes(url.toLowerCase().replace(/https?:\/\/|www\.|\.com|\.net|\.org/g, ''))) {
+                        return file;
+                    }
+                }
+            }
+        }
+        
+        return null; // No existing file found
+    } catch (error) {
+        // If there's an error checking files, return null to continue with download
+        return null;
+    }
+}
+
 function testInternetConnection() {
 	return new Promise(resolve => {
 		dns.lookup('github.com', err => {
@@ -435,6 +510,16 @@ async function startDownloader() {
         if (await getUserConfirmation("¿Iniciar la descarga?")) {
             try {
                 const args = await getDownloadArguments(option);
+                // Check for existing files before downloading
+                const existingFile = await checkExistingFiles(downloadFolder, url, option);
+                if (existingFile) {
+                    const overwrite = await getUserConfirmation(`El archivo "${existingFile}" ya existe. ¿Deseas sobrescribirlo?`);
+                    if (!overwrite) {
+                        writeColor("Descarga cancelada (archivo existente).", 'yellow');
+                        continue;
+                    }
+                }
+
                 args.push(url);
 
                 writeColor(`Comando: ${ytdlpPath} ${args.join(' ')}`, 'gray');
@@ -462,7 +547,7 @@ async function startDownloader() {
                 });
 
             } catch (error) {
-                // El error ya se muestra en el listener del proceso
+                writeColor(`ERROR en la descarga: ${error.message}`, 'red');
             }
         } else {
             writeColor("Descarga cancelada.", 'yellow');
